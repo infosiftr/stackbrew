@@ -130,15 +130,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # again, this would ideally be "github.event.pull_request.merge_commit_sha" but we might not have that yet when this runs, so we compromise by checkout out the latest code from the target branch (so we get the latest "diff-pr.sh" script to run)
-          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
       - uses: ./.github/workflows/.bashbrew
         with:
           build: 'docker'
       - name: Prepare Environment
+        env:
+          PR_COMMIT: ${{ github.event.pull_request.head.sha }}
         run: |
+          # pull and merge pull request
+          # see safe comments below for why those actions are safe when run within the context of the pull request code
+          git fetch --quiet origin "${PR_COMMIT}:"
+          git merge 'FETCH_HEAD'
+
           # this avoids running repo-local scripts (to avoid CVE-2020-15228 via the scripts being updated to write nasty things to $GITHUB_ENV)
+          # safe: a user-supplied Dockerfile cannot access the github token/env
           docker build --tag oisupport/bashbrew:diff-pr .
       - name: Gather Maintainers
         env:
@@ -148,6 +154,7 @@ jobs:
           eval "set -- $files"
           for f; do
             if [ -s "$f" ]; then
+              # safe: bashbrew is run from within a docker container, so can't access github token/env
               docker run --rm --read-only --tmpfs /tmp oisupport/bashbrew:diff-pr \
                 bashbrew cat --format '  - `{{ $.RepoName }}`:{{ range .Manifest.Global.Maintainers }} @{{ .Handle }}{{ end }}' "$f"
             fi
@@ -156,12 +163,15 @@ jobs:
         env:
           GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          # safe: diff-pr.sh is run from within a docker container, so can't access github token/env
+          # it can mess with the output and thus change the diff comment, but this is the case we want to allow
           docker run --rm --read-only --tmpfs /tmp oisupport/bashbrew:diff-pr ./diff-pr.sh "$GITHUB_PR_NUMBER" | tee "$GITHUB_WORKSPACE/oi-pr.diff"
       - name: Comment
         uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // safe: this step doesn't run any code from the checkout
             const commentText = 'Diff for ' + context.payload.pull_request.head.sha + ':';
 
             const fs = require('fs');
